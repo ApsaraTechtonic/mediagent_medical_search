@@ -1,0 +1,32 @@
+data/
+__pycache__/
+*.pyc
+
+# Local databases and backups must not be published.
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite3-*
+*.sqlite-*
+*.db-*
+
+# Local credentials and configuration.
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Dependencies and generated files.
+.venv/
+venv/
+node_modules/
+tmp/
+output/
+hackathon_deck/
+*.log
+.pytest_cache/
+.DS_Store
+Thumbs.db
+
+# Empty repository accidentally created inside the project during Desktop setup.
+/Mediagent_medical_search/
