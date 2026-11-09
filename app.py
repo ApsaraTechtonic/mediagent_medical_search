@@ -244,7 +244,7 @@ and qualified clinicians. This is not patient-specific medical advice."""
 model = DEFAULT_MODEL
 if not is_patient:
     with st.sidebar:
-        st.header("Local model settings")
+        st.header("Local modl settings")
         model = st.text_input("Ollama model name", value=DEFAULT_MODEL).strip() or DEFAULT_MODEL
         st.caption("The model must already be downloaded in Ollama.")
         if st.button("Test local model connection", use_container_width=True):
