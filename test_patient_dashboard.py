@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 from streamlit.testing.v1 import AppTest
 import patient_store as store
+import staff_workflow as workflow
 
 
 def classification(priority, emergency=False):
@@ -20,6 +21,18 @@ class PatientDashboardTests(unittest.TestCase):
         env = patch.dict(os.environ, {"MEDIAGENT_DB_PATH": str(self.path)})
         env.start()
         self.addCleanup(env.stop)
+        self.token = None
+
+    def app(self):
+        if self.token is None:
+            workflow.bootstrap_admin('admin', 'Test admin', 'test-password-123')
+            admin_token = workflow.login('admin', 'test-password-123')
+            workflow.create_staff(admin_token, 'doctor', 'Test doctor', 'Doctor', 'test-password-123')
+            self.token = workflow.login('doctor', 'test-password-123')
+        app = AppTest.from_file("app.py", default_timeout=10)
+        app.session_state['staff_token'] = self.token
+        return app.run()
+
 
     def add(self, reference, priority=None, emergency=False, failure=None):
         encounter_id = store.create_encounter(dict(age=35, gender="Female", symptoms="Context for " + reference), "test-model", reference)
@@ -50,11 +63,12 @@ class PatientDashboardTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(self.path.exists())
         # A new app session reads from disk rather than session_state.
-        app = AppTest.from_file("app.py").run()
+        app = self.app()
         with patch("requests.post") as post:
             app.button(key="open_" + first).click().run()
             self.assertFalse(app.exception)
             self.assertTrue(any("Saved explanation for Urgent" in item.value for item in app.markdown))
+            app.radio(key='main_navigation').set_value('Patient dashboard').run()
             app.button(key="open_" + second).click().run()
             self.assertTrue(any("Saved explanation for Non-urgent" in item.value for item in app.markdown))
             post.assert_not_called()
@@ -63,7 +77,7 @@ class PatientDashboardTests(unittest.TestCase):
     def test_failed_record_can_be_opened_without_ollama(self):
         encounter_id = self.add("Failed-test", failure="Model offline")
         with patch("requests.post") as post:
-            app = AppTest.from_file("app.py").run()
+            app = self.app()
             app.button(key="open_" + encounter_id).click().run()
             self.assertFalse(app.exception)
             self.assertTrue(any("Model offline" in error.value for error in app.error))
@@ -75,7 +89,8 @@ class PatientDashboardTests(unittest.TestCase):
         import json
         response.json.return_value = {"message": {"content": json.dumps(classification("Urgent"))}}
         with patch("requests.post", return_value=response) as post:
-            app = AppTest.from_file("app.py").run()
+            app = self.app()
+            app.radio(key='main_navigation').set_value('Register patient').run()
             next(x for x in app.text_input if x.label == "Patient reference (optional)").set_value("DEMO-42")
             app.text_area[0].set_value("Reported patient context")
             next(x for x in app.button if x.label == "Run Triage Analysis").click().run()
@@ -85,18 +100,20 @@ class PatientDashboardTests(unittest.TestCase):
             self.assertEqual(len(saved), 1)
             self.assertEqual(saved[0]["status"], "Complete")
             self.assertEqual(saved[0]["reference"], "DEMO-42")
+            app.radio(key='main_navigation').set_value('Patient dashboard').run()
             app.button(key="refresh_dashboard").click().run()
             self.assertEqual(len(store.list_encounters()), 1)
             self.assertEqual(post.call_count, 1)
         with patch("requests.post") as post:
-            fresh = AppTest.from_file("app.py").run()
+            fresh = self.app()
             fresh.button(key="open_" + saved[0]["id"]).click().run()
             self.assertTrue(any("Saved explanation for Urgent" in x.value for x in fresh.markdown))
             post.assert_not_called()
 
     def test_model_failure_retains_patient_record(self):
         with patch("requests.post", side_effect=RuntimeError("Model offline")):
-            app = AppTest.from_file("app.py").run()
+            app = self.app()
+            app.radio(key='main_navigation').set_value('Register patient').run()
             app.text_area[0].set_value("Reported context")
             next(x for x in app.button if x.label == "Run Triage Analysis").click().run()
             self.assertFalse(app.exception)
@@ -111,7 +128,8 @@ class PatientDashboardTests(unittest.TestCase):
         response = Mock(status_code=200)
         response.json.return_value = {"message": {"content": json.dumps(classification("Urgent"))}}
         with patch("requests.post", return_value=response), patch("patient_store.finish_encounter", side_effect=sqlite3.OperationalError("disk failure")):
-            app = AppTest.from_file("app.py").run()
+            app = self.app()
+            app.radio(key='main_navigation').set_value('Register patient').run()
             app.text_area[0].set_value("Reported context")
             next(x for x in app.button if x.label == "Run Triage Analysis").click().run()
             self.assertFalse(app.exception)
@@ -121,8 +139,9 @@ class PatientDashboardTests(unittest.TestCase):
 
     def test_storage_unavailable_disables_submission(self):
         import sqlite3
-        with patch("patient_store.list_encounters", side_effect=sqlite3.OperationalError("disk failure")), patch("requests.post") as post:
-            app = AppTest.from_file("app.py").run()
+        with patch("staff_workflow.records", side_effect=sqlite3.OperationalError("disk failure")), patch("requests.post") as post:
+            app = self.app()
+            app.radio(key='main_navigation').set_value('Register patient').run()
             self.assertFalse(app.exception)
             submit = next(x for x in app.button if x.label == "Run Triage Analysis")
             self.assertTrue(submit.disabled)
@@ -152,12 +171,12 @@ class PatientDashboardTests(unittest.TestCase):
         encounter_id = self.add("Named-test", "Urgent")
         store.update_patient_name(encounter_id, "Demo Asha")
         with patch("requests.post") as post:
-            app = AppTest.from_file("app.py").run()
+            app = self.app()
             app.button(key="open_" + encounter_id).click().run()
             app.button(key="complete_care").click().run()
             self.assertFalse(app.exception)
             self.assertEqual(store.get_encounter(encounter_id)["care_status"], "Completed")
-            fresh = AppTest.from_file("app.py").run()
+            fresh = self.app()
             fresh.text_input(key="patient_search").set_value("ASHA").run()
             fresh.radio(key="patient_view").set_value("Completed patients").run()
             fresh.button(key="open_" + encounter_id).click().run()
@@ -193,7 +212,7 @@ class PatientDashboardTests(unittest.TestCase):
         second = self.add("Second-ref", "Non-urgent")
         store.update_patient_name(second, "Demo Same")
         with patch("requests.post") as post:
-            app = AppTest.from_file("app.py").run()
+            app = self.app()
             app.button(key="open_" + first).click().run()
             app.text_input(key="name_" + first).set_value("Demo Same")
             next(x for x in app.button if x.label == "Save patient name").click().run()
@@ -207,7 +226,7 @@ class PatientDashboardTests(unittest.TestCase):
         # Reproduce the screenshot: Python has the earlier module cached in memory.
         del store.filter_encounters
         with patch("requests.post") as post:
-            app = AppTest.from_file("app.py").run()
+            app = self.app()
             self.assertFalse(app.exception)
             self.assertTrue(callable(store.filter_encounters))
             post.assert_not_called()
@@ -239,7 +258,8 @@ class PatientDashboardTests(unittest.TestCase):
         response = Mock(status_code=200)
         response.json.return_value = {"message": {"content": json.dumps(classification("Non-urgent"))}}
         with patch("requests.post", return_value=response) as post:
-            app = AppTest.from_file("app.py").run()
+            app = self.app()
+            app.radio(key='main_navigation').set_value('Register patient').run()
             app.radio(key="registration_type").set_value("Returning patient").run()
             app.text_area[0].set_value("New visit context")
             next(x for x in app.button if x.label == "Run Triage Analysis").click().run()
@@ -249,7 +269,8 @@ class PatientDashboardTests(unittest.TestCase):
             self.assertEqual(len(visits), 2)
             self.assertEqual(visits[0]["patient_id"], visits[1]["patient_id"])
             self.assertEqual(visits[1]["visit_type"], "Returning patient")
-            self.assertTrue(any("Returning patient" in x.value for x in app.caption))
+            self.assertTrue(any("Returning patient" in x.value for x in app.markdown))
+            app.radio(key='main_navigation').set_value('Patient timeline').run()
             app.button(key="history_" + first).click().run()
             self.assertFalse(app.exception)
             self.assertTrue(any("Saved explanation for Urgent" in x.value for x in app.markdown))
@@ -289,10 +310,10 @@ class PatientDashboardTests(unittest.TestCase):
         self.assertEqual(store.get_encounter(second)["visit_type"], "Returning patient")
         self.assertEqual(store.get_encounter(first)["patient_id"], 10001)
         with patch("requests.post") as post:
-            app = AppTest.from_file("app.py").run()
+            app = self.app()
             app.button(key="open_" + first).click().run()
             self.assertFalse(app.exception)
-            self.assertTrue(any("**Patient ID:** 10001" in x.value for x in app.markdown))
+            self.assertTrue(any("Patient ID 10001" in x.value for x in app.markdown))
             self.assertFalse(any("Visit ID" in x.value for x in app.markdown))
             self.assertFalse(any(first in x.value or second in x.value for x in app.caption))
             post.assert_not_called()

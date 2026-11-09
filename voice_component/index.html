@@ -1,0 +1,31 @@
+<!doctype html><html lang="en"><meta charset="utf-8">
+<style>body{font:15px system-ui;color:#17324d;margin:8px}button,select,textarea{font:inherit;padding:9px;border:1px solid #adc6d0;border-radius:6px;margin:4px}button{background:#e6f4f5;cursor:pointer}textarea{display:block;width:94%;height:65px}#status{font-size:13px;margin:8px}</style>
+<label>Dictation language <select id="lang"><option value="en-IN">English (India)</option><option value="hi-IN">Hindi</option><option value="en-US">English (US)</option></select></label>
+<button id="start">Start microphone</button><button id="stop" disabled>Stop</button>
+<div id="status" role="status">Microphone starts only when you click Start. Use general reference questions, without patient identifiers.</div>
+<textarea id="transcript" aria-label="Voice transcript" placeholder="Your transcript appears here. Correct it before using it."></textarea>
+<button id="use">Use this transcript</button>
+<script>
+const el=id=>document.getElementById(id);
+function send(type, extra={}){parent.postMessage({isStreamlitMessage:true,type,...extra},'*');}
+let recognition=null;
+const API=window.SpeechRecognition||window.webkitSpeechRecognition;
+if(!API){el('start').disabled=true;el('status').textContent='Speech recognition is unavailable in this browser. Type your question in the normal search box.';}
+el('start').onclick=()=>{
+ if(!API||recognition)return;
+ recognition=new API();recognition.lang=el('lang').value;recognition.interimResults=false;recognition.continuous=false;
+ recognition.onstart=()=>{el('start').disabled=true;el('stop').disabled=false;el('status').textContent='Listening. Speak a short medical reference question.';};
+ recognition.onresult=e=>{el('transcript').value=Array.from(e.results).map(r=>r[0].transcript).join(' ');el('status').textContent='Review and correct the transcript, then click Use this transcript.';};
+ recognition.onerror=e=>{el('status').textContent='Microphone or recognition unavailable ('+e.error+'). Allow microphone access or use typed input.';};
+ recognition.onend=()=>{recognition=null;el('start').disabled=!API;el('stop').disabled=true;};
+ try{recognition.start();}catch(e){recognition=null;el('status').textContent='Could not start speech recognition. Use typed input.';}
+};
+el('stop').onclick=()=>{if(recognition)recognition.stop();};
+el('use').onclick=()=>{
+ const text=el('transcript').value.trim();
+ if(!text){el('status').textContent='Record or enter a transcript first.';return;}
+ send('streamlit:setComponentValue',{value:{text:text.slice(0,6000),id:Date.now()},dataType:'json'});
+};
+window.addEventListener('pagehide',()=>{if(recognition)recognition.abort();});
+send('streamlit:componentReady',{apiVersion:1});send('streamlit:setFrameHeight',{height:245});
+</script></html>

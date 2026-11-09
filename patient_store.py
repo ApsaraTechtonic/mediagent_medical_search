@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "triage.sqlite3"
+WORKFLOW_SCHEMA_VERSION = 2
 
 
 def database_path():
@@ -37,6 +38,7 @@ def _connect():
                 "patient_id": "INTEGER",
                 "visit_code": "TEXT",
                 "visit_type": "TEXT NOT NULL DEFAULT 'New patient'",
+                "intake_json": "TEXT NOT NULL DEFAULT '{}'",
             }.items():
                 if column not in columns:
                     connection.execute(f"ALTER TABLE encounters ADD COLUMN {column} {definition}")
@@ -82,9 +84,12 @@ def patient_code(patient_id):
     return str(patient_id)
 
 
-def create_encounter(patient, model, reference="", patient_name="", existing_patient_id=None):
+def create_encounter(patient, model, reference="", patient_name="", existing_patient_id=None, actor=None):
     created = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     with _connect() as connection:
+        if actor:
+            from staff_workflow import authorize_actor, CLINICAL
+            authorize_actor(connection, actor, ('Reception',)+CLINICAL)
         if existing_patient_id is None:
             patient_id = connection.execute("INSERT INTO patients DEFAULT VALUES").lastrowid
             visit_type = "New patient"
@@ -104,13 +109,27 @@ def create_encounter(patient, model, reference="", patient_name="", existing_pat
              patient["symptoms"], model, "Pending", None, None, patient_name.strip(),
              patient_id, encounter_id, visit_type),
         )
+        connection.execute('UPDATE encounters SET intake_json=? WHERE id=?',
+                           (json.dumps(patient.get('intake', {}), ensure_ascii=False), encounter_id))
+        if actor:
+            from staff_workflow import _event
+            _event(connection, actor, 'Patient registered', {'id': encounter_id, 'patient_id': patient_id},
+                   dict(visit_type=visit_type, age=patient['age'], gender=patient['gender'],
+                        symptoms=patient['symptoms'], intake=patient.get('intake', {}),
+                        patient_name=patient_name.strip(), reference=reference))
     return encounter_id
 
 
-def finish_encounter(encounter_id, classification=None, error=None):
+def finish_encounter(encounter_id, classification=None, error=None, actor=None):
     if (classification is None) == (error is None):
         raise ValueError("Supply either a classification or a failure reason")
     with _connect() as connection:
+        if actor:
+            from staff_workflow import authorize_actor, CLINICAL
+            authorize_actor(connection, actor, CLINICAL)
+        before = get_row(connection, encounter_id)
+        if actor and before['classification']:
+            raise ValueError('The saved AI report is retained. Record a staff review separately.')
         cursor = connection.execute(
             "UPDATE encounters SET status=?, classification=?, error=? WHERE id=?",
             ("Complete" if classification is not None else "Failed",
@@ -119,6 +138,10 @@ def finish_encounter(encounter_id, classification=None, error=None):
         )
         if cursor.rowcount != 1:
             raise ValueError("Encounter was not found")
+        if actor:
+            from staff_workflow import _event
+            _event(connection, actor, 'AI report saved' if classification else 'AI classification failed', before,
+                   dict(classification=classification, error=error))
 
 
 def _decode(row):
@@ -126,6 +149,7 @@ def _decode(row):
         return None
     result = dict(row)
     result["classification"] = json.loads(result["classification"]) if result["classification"] else None
+    result['intake'] = json.loads(result.get('intake_json') or '{}')
     return result
 
 
@@ -142,10 +166,21 @@ def list_encounters():
 CARE_STATUSES = ("Waiting", "In care", "Completed")
 
 
-def update_care_status(encounter_id, care_status):
+def get_row(connection, encounter_id):
+    row = connection.execute('SELECT * FROM encounters WHERE id=?', (encounter_id,)).fetchone()
+    if row is None:
+        raise ValueError('Encounter was not found')
+    return dict(row)
+
+
+def update_care_status(encounter_id, care_status, actor=None):
     if care_status not in CARE_STATUSES:
         raise ValueError("Invalid care status")
     with _connect() as connection:
+        if actor:
+            from staff_workflow import authorize_actor, CLINICAL
+            authorize_actor(connection, actor, CLINICAL)
+        before = get_row(connection, encounter_id)
         cursor = connection.execute(
             """UPDATE encounters SET care_status=?,
                completed_at=CASE WHEN ?='Completed' THEN COALESCE(completed_at, ?) ELSE NULL END
@@ -154,14 +189,26 @@ def update_care_status(encounter_id, care_status):
         )
         if cursor.rowcount != 1:
             raise ValueError("Encounter was not found")
+        if actor:
+            from staff_workflow import _event
+            _event(connection, actor, 'Care status changed', before,
+                   dict(before=before['care_status'], after=care_status))
 
 
-def update_patient_name(encounter_id, patient_name):
+def update_patient_name(encounter_id, patient_name, actor=None):
     with _connect() as connection:
+        if actor:
+            from staff_workflow import authorize_actor, CLINICAL
+            authorize_actor(connection, actor, ('Reception',)+CLINICAL)
+        before = get_row(connection, encounter_id)
         cursor = connection.execute("UPDATE encounters SET patient_name=? WHERE id=?",
                                     (patient_name.strip(), encounter_id))
         if cursor.rowcount != 1:
             raise ValueError("Encounter was not found")
+        if actor:
+            from staff_workflow import _event
+            _event(connection, actor, 'Patient name changed', before,
+                   dict(before=before['patient_name'], after=patient_name.strip()))
 
 
 def filter_encounters(records, search="", view="All patients"):
@@ -180,12 +227,12 @@ def dashboard_groups(records):
     for record in records:
         if record.get("care_status") == "Completed":
             continue
-        result = record["classification"]
-        if record["status"] != "Complete" or not result or result["priority"] not in rank:
+        result = record.get('review') or record["classification"]
+        if not result or result["priority"] not in rank:
             assessment.append(record)
         else:
             classified.append(record)
-    classified.sort(key=lambda r: (rank[r["classification"]["priority"]],
-                                    not r["classification"]["immediate_emergency"], r["created_at"], r["id"]))
+    classified.sort(key=lambda r: (rank[(r.get('review') or r["classification"])["priority"]],
+                                    not (r.get('classification') or {}).get('immediate_emergency', False), r["created_at"], r["id"]))
     assessment.sort(key=lambda r: (r["created_at"], r["id"]))
     return classified, assessment
