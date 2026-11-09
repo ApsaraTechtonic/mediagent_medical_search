@@ -1,4 +1,5 @@
 import re
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 import patient_store
@@ -25,8 +26,8 @@ from voice_search import voice_input
 from ui_theme import apply_theme, page_hero, patient_banner, report_cards
 
 APP_TITLE = "MediAgent AI: Smart Healthcare Assistant"
-OLLAMA_URL = "http://localhost:11434/api/chat"
-DEFAULT_MODEL = "qwen2.5:3b"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🩺", layout="wide")
 apply_theme()
@@ -96,38 +97,79 @@ page_details = {
 page_hero(*page_details[page])
 st.markdown('<div class="prototype-note">Unvalidated clinical support prototype. For a possible emergency, activate local emergency procedures immediately. Use fictional demo records.</div>', unsafe_allow_html=True)
 
-def call_ollama(messages, model, num_predict=None, response_format=None):
-    try:
-        payload = {"model": model, "messages": messages, "stream": False, "keep_alive": "10m"}
-        if response_format is not None:
-            payload["format"] = response_format
-            payload["options"] = {"temperature": 0}
-        if num_predict is not None:
-            payload.setdefault("options", {})["num_predict"] = num_predict
-        response = requests.post(OLLAMA_URL, json=payload, timeout=180)
-    except requests.exceptions.ConnectionError as exc:
-        raise RuntimeError(
-            "Cannot connect to Ollama at http://localhost:11434. Open Ollama and "
-            "confirm the model is installed with `ollama pull qwen2.5:3b`."
-        ) from exc
-    except requests.exceptions.Timeout as exc:
-        raise RuntimeError("The local model timed out. Retry, or use a smaller model.") from exc
+def call_gemini(messages, model, num_predict=None, response_format=None):
+    api_key = os.getenv("GEMINI_API_KEY")
 
-    if response.status_code == 404:
-        raise RuntimeError(f"Model '{model}' was not found. Run `ollama pull {model}`.")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
+
+    contents = []
+    system_messages = []
+
+    for message in messages:
+        role = message["role"]
+        content = message["content"]
+
+        if role == "system":
+            system_messages.append(content)
+        else:
+            contents.append({
+                "role": "model" if role == "assistant" else "user",
+                "parts": [{"text": content}]
+            })
+
+    payload = {"contents": contents}
+
+    if system_messages:
+        payload["systemInstruction"] = {
+            "parts": [{"text": "\n\n".join(system_messages)}]
+        }
+
+    generation_config = {}
+
+    if response_format is not None:
+        generation_config["responseMimeType"] = "application/json"
+        generation_config["responseJsonSchema"] = response_format
+
+    if num_predict is not None:
+        generation_config["maxOutputTokens"] = num_predict
+
+    if generation_config:
+        payload["generationConfig"] = generation_config
+
+    url = f"{GEMINI_API_URL}{model}:generateContent"
+
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "x-goog-api-key": api_key,
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=120
+        )
+    except requests.exceptions.Timeout as exc:
+        raise RuntimeError("Gemini request timed out. Please try again.") from exc
+    except requests.exceptions.ConnectionError as exc:
+        raise RuntimeError("Could not connect to Gemini API.") from exc
+
     if response.status_code >= 400:
         try:
-            detail = response.json().get("error", response.text)
+            detail = response.json().get("error", {}).get("message", response.text)
         except ValueError:
             detail = response.text
-        raise RuntimeError(f"Ollama returned HTTP {response.status_code}: {detail}")
+        raise RuntimeError(f"Gemini API error ({response.status_code}): {detail}")
 
     try:
-        answer = response.json().get("message", {}).get("content", "").strip()
-    except (ValueError, AttributeError) as exc:
-        raise RuntimeError("Ollama returned an unexpected response.") from exc
+        data = response.json()
+        answer = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("Gemini returned an unexpected or empty response.") from exc
+
     if not answer:
-        raise RuntimeError("The local model returned an empty answer. Please try again.")
+        raise RuntimeError("Gemini returned an empty answer.")
+
     return answer
 
 def render_review_warning(classification):
@@ -241,16 +283,16 @@ Do not pretend to have searched the live web or a curated database, and do not f
 Encourage verification against current official drug labels, reputable guidelines, local protocols,
 and qualified clinicians. This is not patient-specific medical advice."""
 
-model = DEFAULT_MODEL
+model = GEMINI_MODEL
 if not is_patient:
     with st.sidebar:
-        st.header("Local modl settings")
-        model = st.text_input("Ollama model name", value=DEFAULT_MODEL).strip() or DEFAULT_MODEL
-        st.caption("The model must already be downloaded in Ollama.")
-        if st.button("Test local model connection", use_container_width=True):
+        st.header("Gemini settings")
+        model = st.text_input("Gemini model name", value=GEMINI_MODEL).strip() or GEMINI_MODEL
+        st.caption("Using Google's Gemini API.")
+        if st.button("Test Gemini connection", use_container_width=True):
             try:
                 with st.spinner("Testing Ollama..."):
-                    answer = call_ollama(
+                    answer = call_gemini(
                         [{"role": "user", "content": "Reply exactly: Connection successful."}],
                         model,
                     )
@@ -378,7 +420,7 @@ if page in ('Patient dashboard', 'Register patient', 'Patient report', 'Clinical
                     st.info('Patient saved for manual assessment. No AI request was made.')
                 else:
                     with st.spinner("Classifying patient context with Ollama..."):
-                        classification = classify_patient(patient, model, call_ollama)
+                        classification = classify_patient(patient, model, call_gemini)
                     with review_alert.container():
                         render_review_warning(classification)
                     finish_encounter(encounter_id, classification=classification)
@@ -525,7 +567,7 @@ if page in ('Patient dashboard', 'Register patient', 'Patient report', 'Clinical
                     try:
                         patient = {k: selected[k] for k in ('age', 'gender', 'symptoms', 'intake')}
                         with st.spinner('Classifying the saved context with Ollama...'):
-                            result = classify_patient(patient, model, call_ollama)
+                            result = classify_patient(patient, model, call_gemini)
                         finish_encounter(selected['id'], classification=result)
                         st.rerun()
                     except Exception as exc:
@@ -589,7 +631,7 @@ if page == 'ER patient triage assistant':
         else:
             try:
                 with st.spinner('Checking symptoms with the local model…'):
-                    result = classify_patient({'age': age, 'symptoms': symptoms.strip()}, model, call_ollama)
+                    result = classify_patient({'age': age, 'symptoms': symptoms.strip()}, model, call_gemini)
             except (RuntimeError, requests.RequestException):
                 st.warning('The symptom check is unavailable. Contact a qualified healthcare professional for assessment.')
             else:
@@ -655,7 +697,7 @@ if page == 'Medical knowledge search':
                         "RETRIEVED MEDLINEPLUS SOURCES:\n" + "\n\n".join(context_parts)
                     )
                     with st.spinner("Summarizing retrieved sources with the local model..."):
-                        st.session_state["knowledge_result"] = call_ollama(
+                        st.session_state["knowledge_result"] = call_gemini(
                             [{"role": "system", "content": KNOWLEDGE_SYSTEM},
                              {"role": "user", "content": grounded_prompt}],
                             model,

@@ -118,6 +118,92 @@ def apply_theme():
     @media(max-width:800px){.patient-banner{grid-template-columns:1fr;gap:14px}.banner-cell{border-left:0;border-top:1px solid #bad8e1;padding:14px 0 0}}
     @media(max-width:600px){.hero-symbol{display:none}.page-hero{min-height:0}}
     @media(prefers-reduced-motion:reduce){button{transition:none!important}button:hover{transform:none}}
+
+/* Theme-aware colours */
+.stApp {
+    background: var(--background-color) !important;
+    color: var(--text-color) !important;
+}
+
+/* Sidebar */
+[data-testid="stSidebar"] {
+    background: var(--secondary-background-color) !important;
+    color: var(--text-color) !important;
+}
+
+/* Main cards and containers */
+[data-testid="stForm"],
+[data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stMetric"],
+.st-key-account_queue,
+.st-key-account_detail,
+.st-key-account_empty,
+.st-key-auth_panel,
+.st-key-reference_answer {
+    background: var(--secondary-background-color) !important;
+    color: var(--text-color) !important;
+    border-color: var(--secondary-background-color) !important;
+}
+
+/* Headings and normal text */
+.stApp h1,
+.stApp h2,
+.stApp h3,
+.stApp p,
+.stApp label,
+.stApp [data-testid="stMarkdownContainer"] {
+    color: var(--text-color);
+}
+
+/* Inputs */
+.stApp input,
+.stApp textarea,
+.stApp select {
+    background: var(--background-color) !important;
+    color: var(--text-color) !important;
+}
+
+/* Metrics */
+[data-testid="stMetric"] label,
+[data-testid="stMetricValue"],
+[data-testid="stMetricDelta"] {
+    color: var(--text-color) !important;
+}
+
+/* Patient information cards */
+.patient-banner,
+.account-identity,
+.session-card {
+    background: var(--secondary-background-color) !important;
+    color: var(--text-color) !important;
+    border-color: var(--text-color) !important;
+}
+
+.patient-banner strong,
+.patient-banner small,
+.account-identity strong,
+.account-identity small,
+.session-card strong,
+.session-card small {
+    color: var(--text-color) !important;
+}
+
+/* Navigation */
+.st-key-main_navigation label {
+    color: var(--text-color);
+}
+
+.st-key-main_navigation label:hover {
+    background: var(--secondary-background-color);
+}
+
+/* Keep the dark hero readable */
+.account-hero,
+.account-hero h1,
+.account-hero p {
+    color: #ffffff !important;
+}
+
     </style>''', unsafe_allow_html=True)
 
 
